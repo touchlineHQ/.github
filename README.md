@@ -12,7 +12,7 @@ This repository must stay **public**. GitHub only renders a public organisation 
 
 [`.github/workflows/dependabot-auto-merge.yml`](.github/workflows/dependabot-auto-merge.yml) merges Dependabot pull requests once CI has passed, up to a semver ceiling. It never checks out pull request code, skips GitHub Actions bumps by default, and needs no branch protection or ruleset.
 
-Add this to a repository as `.github/workflows/dependabot-auto-merge.yml`. The only line that has to change per repository is `workflows:`: list the `name:` of every workflow whose completion may trigger a merge.
+Add this to a repository as `.github/workflows/dependabot-auto-merge.yml`. The only line that has to change per repository is `workflows:`: list the `name:` of every workflow whose completion may trigger a merge. In auto mode (empty `required-checks`), list every workflow that runs on `pull_request`: if the last one to finish is not listed, nothing triggers the merge and the pull request stays open.
 
 ```yaml
 name: Dependabot auto-merge
@@ -21,7 +21,7 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened]
   workflow_run:
-    workflows: ["Test"] # EDIT: workflow `name:` values, exactly
+    workflows: ["Test"] # EDIT: workflow `name:` values, exactly; in auto mode, every pull_request workflow
     types: [completed]
 
 permissions: {}

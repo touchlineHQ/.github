@@ -16,6 +16,10 @@ name: Dependabot auto-merge (reusable)
 #   workflow_run:        workflows [<every workflow `name:` whose completion
 #                        may attempt a merge>], types [completed]
 #
+# In auto mode (empty required-checks), list every workflow that runs on
+# pull_request: if the last one to finish is not listed, nothing triggers the
+# merge and the pull request stays open.
+#
 # and grant the calling job: contents: write, pull-requests: write,
 # checks: read, actions: write. All four are always required, even when
 # deploy-workflow is empty: the merge job declares actions: write, and GitHub
@@ -536,7 +540,16 @@ jobs:
             'and .user.login == "dependabot[bot]"' \
             'and .head.sha == env.HEAD_SHA' \
             "and ([.labels[].name] | index(\"$AUTOMERGE_LABEL\") != null)")
-          labelled=$(gh api "repos/$REPO/pulls/$pr" --jq "$jq_prog")
+          # The label job (pull_request_target) can still be adding the label when a
+          # fast CI workflow completes, so give it a bounded grace period.
+          labelled=false
+          for attempt in 1 2 3 4 5 6; do
+            labelled=$(gh api "repos/$REPO/pulls/$pr" --jq "$jq_prog")
+            if [ "$labelled" = "true" ] || [ "$attempt" -eq 6 ]; then
+              break
+            fi
+            sleep 10
+          done
           if [ "$labelled" != "true" ]; then
             echo "PR #$pr is not an open, ${AUTOMERGE_LABEL}-labelled Dependabot PR at $HEAD_SHA; leaving it."
             exit 0
