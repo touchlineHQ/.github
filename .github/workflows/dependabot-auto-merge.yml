@@ -17,10 +17,12 @@ name: Dependabot auto-merge (reusable)
 #                        may attempt a merge>], types [completed]
 #
 # and grant the calling job: contents: write, pull-requests: write,
-# checks: read, actions: write (actions: write is only used for the deploy
-# dispatch; drop it when deploy-workflow is empty). Jobs below ask for less
-# where they can. The `github` context (event, actor, repository) is the
-# caller's, so every condition below behaves exactly as it would inline.
+# checks: read, actions: write. All four are always required, even when
+# deploy-workflow is empty: the merge job declares actions: write, and GitHub
+# rejects the whole run at startup if the caller grants less than any job in
+# this workflow declares. Jobs below ask for less where they can. The
+# `github` context (event, actor, repository) is the caller's, so every
+# condition below behaves exactly as it would inline.
 #
 # Inputs
 #

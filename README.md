@@ -34,7 +34,7 @@ jobs:
       contents: write
       pull-requests: write
       checks: read
-      actions: write # only needed with deploy-workflow
+      actions: write # always required: the merge job declares it, so granting less fails the run at startup
     with:
       allowed-updates: minor # patch | minor | major
       # allow-unclassified: "true"
