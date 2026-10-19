@@ -33,6 +33,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      issues: write # creates automerge-label on first use
       checks: read
       actions: write # always required: the merge job declares it, so granting less fails the run at startup
     with:

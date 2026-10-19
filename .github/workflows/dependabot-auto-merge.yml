@@ -21,12 +21,13 @@ name: Dependabot auto-merge (reusable)
 # merge and the pull request stays open.
 #
 # and grant the calling job: contents: write, pull-requests: write,
-# checks: read, actions: write. All four are always required, even when
-# deploy-workflow is empty: the merge job declares actions: write, and GitHub
-# rejects the whole run at startup if the caller grants less than any job in
-# this workflow declares. Jobs below ask for less where they can. The
-# `github` context (event, actor, repository) is the caller's, so every
-# condition below behaves exactly as it would inline.
+# issues: write, checks: read, actions: write. All five are always required,
+# even when deploy-workflow is empty: the label job declares issues: write
+# (to create automerge-label on first use) and the merge job declares
+# actions: write, and GitHub rejects the whole run at startup if the caller
+# grants less than any job in this workflow declares. Jobs below ask for
+# less where they can. The `github` context (event, actor, repository) is
+# the caller's, so every condition below behaves exactly as it would inline.
 #
 # Inputs
 #
@@ -145,6 +146,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      issues: write # creates automerge-label on first use
       pull-requests: write
     steps:
       - name: Fetch Dependabot metadata
@@ -596,7 +598,9 @@ jobs:
           if [ "$named_checks" != true ]; then
             # Auto mode: the latest attempt of every pull_request workflow run on
             # this commit must have completed as success, skipped or neutral.
-            runs_json=$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=100")
+            runs_json=$(gh api --paginate --slurp \
+              "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=100" |
+              jq '{workflow_runs: [.[].workflow_runs[]]}')
             count=$(printf '%s' "$runs_json" | jq '[.workflow_runs[].workflow_id] | unique | length')
             if [ "$count" -eq 0 ]; then
               echo "No pull_request workflow runs on $HEAD_SHA; not merging PR #$pr."
