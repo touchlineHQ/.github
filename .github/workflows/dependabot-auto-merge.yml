@@ -778,6 +778,13 @@ jobs:
           fi
 
           if [ "$mode" = review ]; then
+            # Review requests apply to the PR, not a commit. If Dependabot pushed
+            # since the lookup above, leave the new head to its own check run.
+            current=$(gh api "repos/$REPO/pulls/$pr" --jq '[.state, .head.sha] | @tsv')
+            if [ "$current" != "open"$'\t'"$HEAD_SHA" ]; then
+              echo "PR #$pr is no longer open at $HEAD_SHA; not requesting a review."
+              exit 0
+            fi
             request_review "$pr" "$why, checks passed on $HEAD_SHA"
             exit 0
           fi
