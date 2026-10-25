@@ -46,6 +46,10 @@ jobs:
       # deploy-ref: main
       # merge-method: squash
       # automerge-label: automerge:ok
+      # request-review: "true"  # ask for a review on PRs it won't merge (majors, by default), once checks pass
+      # reviewers: adamsuk      # empty = the repo owner if that's a user; org-owned repos must set this
 ```
+
+Dependabot pull requests the workflow won't merge (with `allowed-updates: minor`, every major) are never auto-merged. Once the same required checks have passed, including any preview build you list in `required-checks`, it requests a review from `reviewers` and turns off any native auto-merge left on the pull request. Someone already requested, or who already reviewed the head commit, isn't asked again.
 
 Repository settings: none required. The `automerge-label` label is created on first use. GitHub Actions bumps, and any pull request touching `.github/workflows/`, are left for a manual merge because `GITHUB_TOKEN` cannot merge workflow changes.

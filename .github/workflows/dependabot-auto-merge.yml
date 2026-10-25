@@ -71,11 +71,28 @@ name: Dependabot auto-merge (reusable)
 # merge-method is squash, merge, or rebase. automerge-label is the label the
 # label job manages.
 #
+# request-review ("true" by default) asks a person to review any Dependabot
+# pull request this workflow will not merge itself: one above the ceiling
+# (a major, with the default `minor`), an unclassified one when
+# allow-unclassified is not "true", a skipped ecosystem, or one touching
+# .github/workflows/. The request is made by the merge job, so it only
+# happens once the required checks (or, in auto mode, every pull_request
+# workflow run) on the head commit have passed, which is the same gate a
+# merge would have used. Include any preview build in required-checks so the
+# review is only requested once the preview built. A login already requested,
+# or that already reviewed the head commit, is not asked again, so repeated
+# workflow_run events are harmless. Any native auto-merge left enabled on such
+# a pull request is turned off.
+#
+# reviewers is the logins to ask (comma or newline separated). Empty means the
+# repository owner when that is a user account. Organisation-owned
+# repositories must name someone, or no review is requested (a warning says so).
+#
 # Two jobs:
 #
 #   label  (pull_request_target) adds the label when the bump is within the
-#          ceiling, and removes it when a later push is not. It never checks
-#          out the pull request.
+#          ceiling, and removes it (and turns off any native auto-merge) when
+#          a later push is not. It never checks out the pull request.
 #
 #   merge  (workflow_run) merges only when the pull request is still open,
 #          authored by dependabot[bot], carries the label, its head is still
@@ -84,7 +101,9 @@ name: Dependabot auto-merge (reusable)
 #          workflow run) on that commit succeeded, and nothing under
 #          .github/workflows/ changed. Anything else exits quietly. A merge
 #          GitHub refuses (a conflict, or a stale branch after a sibling
-#          merged) is a warning and is left for Dependabot to rebase.
+#          merged) is a warning and is left for Dependabot to rebase. A pull
+#          request it will not merge gets a review request instead, once the
+#          same checks have passed (see request-review).
 #
 # Neither job checks out or runs the pull request's code. That is what makes
 # these triggers safe with a write token. Keep it that way. Inputs reach the
@@ -124,6 +143,14 @@ on:
         description: "Label marking a pull request as within policy."
         type: string
         default: "automerge:ok"
+      request-review:
+        description: '"true" to request a review on Dependabot PRs left for a person (for example majors) once the required checks pass.'
+        type: string
+        default: "true"
+      reviewers:
+        description: "Logins to request a review from (comma or newline separated). Empty = the repository owner, when that is a user account."
+        type: string
+        default: ""
 
 permissions: {}
 
@@ -136,6 +163,8 @@ env:
   DEPLOY_REF: ${{ inputs.deploy-ref }}
   MERGE_METHOD: ${{ inputs.merge-method }}
   AUTOMERGE_LABEL: ${{ inputs.automerge-label }}
+  REQUEST_REVIEW: ${{ inputs.request-review }}
+  REVIEWERS: ${{ inputs.reviewers }}
 
 jobs:
   label:
@@ -319,6 +348,17 @@ jobs:
             exit 1
           fi
 
+          # GITHUB_TOKEN cannot merge changes to workflow files, so such a PR is
+          # outside the policy from the start, whatever its update-type.
+          if [ "$rc" -eq 0 ]; then
+            workflow_files=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" \
+              --jq '.[] | select(.filename | startswith(".github/workflows/")) | .filename')
+            if [ -n "$workflow_files" ]; then
+              echo "PR #$PR_NUMBER changes .github/workflows/; GITHUB_TOKEN cannot merge it, so it is left for a person."
+              rc=1
+            fi
+          fi
+
           names=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.labels[].name')
           labelled=false
           if printf '%s\n' "$names" | grep -Fxq "$AUTOMERGE_LABEL"; then
@@ -338,6 +378,19 @@ jobs:
             echo "Removed $AUTOMERGE_LABEL from PR #$PR_NUMBER."
           else
             echo "PR #$PR_NUMBER left unlabelled."
+          fi
+
+          # Outside the policy: make sure nothing merges it on its own, including a
+          # native auto-merge someone enabled earlier.
+          if [ "$rc" -ne 0 ]; then
+            auto=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.auto_merge != null')
+            if [ "$auto" = "true" ]; then
+              if gh pr merge "$PR_NUMBER" --repo "$REPO" --disable-auto; then
+                echo "Turned off auto-merge on PR #$PR_NUMBER."
+              else
+                echo "::warning::Could not turn off auto-merge on PR #$PR_NUMBER; turn it off by hand."
+              fi
+            fi
           fi
 
   merge:
@@ -535,27 +588,64 @@ jobs:
             exit 0
           fi
 
-          # Re-read the PR itself rather than trusting the list above. The label is
-          # interpolated only after AUTOMERGE_LABEL was restricted to a safe character set.
-          jq_prog=$(printf '%s\n' \
-            '.state == "open"' \
-            'and .user.login == "dependabot[bot]"' \
-            'and .head.sha == env.HEAD_SHA' \
-            "and ([.labels[].name] | index(\"$AUTOMERGE_LABEL\") != null)")
-          # The label job (pull_request_target) can still be adding the label when a
-          # fast CI workflow completes, so give it a bounded grace period.
-          labelled=false
-          for attempt in 1 2 3 4 5 6; do
-            labelled=$(gh api "repos/$REPO/pulls/$pr" --jq "$jq_prog")
-            if [ "$labelled" = "true" ] || [ "$attempt" -eq 6 ]; then
-              break
+          case "$REQUEST_REVIEW" in
+            true|false) ;;
+            *)
+              echo "::error::REQUEST_REVIEW must be true or false."
+              exit 1
+              ;;
+          esac
+
+          # Ask REVIEWERS (or the owner, when the repo is user-owned) to review PR $1.
+          # Skips anyone already requested, or who already reviewed this head commit.
+          request_review() {
+            local pr="$1" why="$2" logins owner login requested reviewed asked=0
+            logins=""
+            while IFS= read -r login || [ -n "$login" ]; do
+              login=$(trim "$login")
+              login=${login#@}
+              [ -z "$login" ] && continue
+              if ! printf '%s' "$login" | grep -Eq '^[A-Za-z0-9-]+$'; then
+                echo "::error::REVIEWERS contains an invalid login."
+                return 1
+              fi
+              logins="$logins$login"$'\n'
+            done <<< "$(printf '%s' "${REVIEWERS:-}" | tr ',' '\n')"
+            if [ -z "$logins" ]; then
+              owner=${REPO%%/*}
+              if [ "$(gh api "users/$owner" --jq '.type')" = "User" ]; then
+                logins="$owner"$'\n'
+              else
+                echo "::warning::PR #$pr needs a review ($why), but REVIEWERS is empty and $owner is not a user account. Set the reviewers input."
+                return 0
+              fi
             fi
-            sleep 10
-          done
-          if [ "$labelled" != "true" ]; then
-            echo "PR #$pr is not an open, ${AUTOMERGE_LABEL}-labelled Dependabot PR at $HEAD_SHA; leaving it."
-            exit 0
-          fi
+            requested=$(gh api "repos/$REPO/pulls/$pr/requested_reviewers" --jq '.users[].login')
+            reviewed=$(gh api --paginate "repos/$REPO/pulls/$pr/reviews?per_page=100" \
+              --jq '.[] | select(.commit_id == env.HEAD_SHA) | .user.login')
+            while IFS= read -r login; do
+              [ -z "$login" ] && continue
+              if printf '%s\n' "$requested" "$reviewed" | grep -Fxiq "$login"; then
+                echo "$login is already requested on, or has reviewed, PR #$pr at $HEAD_SHA."
+                continue
+              fi
+              # Review requests apply to the PR, not a commit. Recheck right before
+              # each request; if Dependabot pushed or the PR closed, stop and leave
+              # the new head to its own check run.
+              current=$(gh api "repos/$REPO/pulls/$pr" --jq '[.state, .head.sha] | @tsv')
+              if [ "$current" != "open"$'\t'"$HEAD_SHA" ]; then
+                echo "PR #$pr is no longer open at $HEAD_SHA; not requesting a review."
+                break
+              fi
+              if gh api -X POST "repos/$REPO/pulls/$pr/requested_reviewers" -f "reviewers[]=$login" --silent; then
+                echo "Requested a review from $login on PR #$pr ($why)."
+                asked=$((asked + 1))
+              else
+                echo "::warning::Could not request a review from $login on PR #$pr (not a collaborator?)."
+              fi
+            done <<< "$logins"
+            echo "Review requests made on PR #$pr: $asked."
+          }
 
           # fetch-metadata only understands pull_request payloads, and this job runs on
           # workflow_run. Dependabot writes the same update-type lines into the commit
@@ -577,11 +667,64 @@ jobs:
           if [ "$rc" -eq 2 ]; then
             exit 1
           fi
-          if [ "$rc" -ne 0 ]; then
-            encoded=$(jq -rn --arg l "$AUTOMERGE_LABEL" '$l|@uri')
-            gh api -X DELETE "repos/$REPO/issues/$pr/labels/$encoded" --silent
-            echo "PR #$pr is outside the auto-merge policy; removed ${AUTOMERGE_LABEL} and left it."
-            exit 0
+
+          # GITHUB_TOKEN cannot merge changes to workflow files, so leave any such PR
+          # (normally a GitHub Actions bump) for a person. Classified before the checks,
+          # so any native auto-merge is turned off before they finish.
+          why="outside the auto-merge policy"
+          if [ "$rc" -eq 0 ]; then
+            workflow_files=$(gh api --paginate "repos/$REPO/pulls/$pr/files?per_page=100" \
+              --jq '.[] | select(.filename | startswith(".github/workflows/")) | .filename')
+            if [ -n "$workflow_files" ]; then
+              echo "::notice::PR #$pr changes .github/workflows/ ($(echo "$workflow_files" | paste -sd, -)); GITHUB_TOKEN cannot merge workflow changes, leaving it for a person."
+              why="changes .github/workflows/"
+              rc=1
+            fi
+          fi
+
+          if [ "$rc" -eq 0 ]; then
+            mode=merge
+            # Re-read the PR itself rather than trusting the list above. The label is
+            # interpolated only after AUTOMERGE_LABEL was restricted to a safe character set.
+            jq_prog=$(printf '%s\n' \
+              '.state == "open"' \
+              'and .user.login == "dependabot[bot]"' \
+              'and .head.sha == env.HEAD_SHA' \
+              "and ([.labels[].name] | index(\"$AUTOMERGE_LABEL\") != null)")
+            # The label job (pull_request_target) can still be adding the label when a
+            # fast CI workflow completes, so give it a bounded grace period.
+            labelled=false
+            for attempt in 1 2 3 4 5 6; do
+              labelled=$(gh api "repos/$REPO/pulls/$pr" --jq "$jq_prog")
+              if [ "$labelled" = "true" ] || [ "$attempt" -eq 6 ]; then
+                break
+              fi
+              sleep 10
+            done
+            if [ "$labelled" != "true" ]; then
+              echo "PR #$pr is not an open, ${AUTOMERGE_LABEL}-labelled Dependabot PR at $HEAD_SHA; leaving it."
+              exit 0
+            fi
+          else
+            mode=review
+            pr_json=$(gh api "repos/$REPO/pulls/$pr")
+            if printf '%s' "$pr_json" | jq -e --arg l "$AUTOMERGE_LABEL" '[.labels[].name] | index($l) != null' > /dev/null; then
+              encoded=$(jq -rn --arg l "$AUTOMERGE_LABEL" '$l|@uri')
+              gh api -X DELETE "repos/$REPO/issues/$pr/labels/$encoded" --silent
+              echo "Removed ${AUTOMERGE_LABEL} from PR #$pr."
+            fi
+            if printf '%s' "$pr_json" | jq -e '.auto_merge != null' > /dev/null; then
+              if gh pr merge "$pr" --repo "$REPO" --disable-auto; then
+                echo "Turned off auto-merge on PR #$pr."
+              else
+                echo "::warning::Could not turn off auto-merge on PR #$pr; turn it off by hand."
+              fi
+            fi
+            if [ "$REQUEST_REVIEW" != "true" ]; then
+              echo "PR #$pr is outside the auto-merge policy; leaving it (request-review is off)."
+              exit 0
+            fi
+            echo "PR #$pr is outside the auto-merge policy; a review is requested once its checks pass."
           fi
 
           # Is REQUIRED_CHECKS empty (ignoring blank and # lines)? Then auto mode.
@@ -642,12 +785,8 @@ jobs:
             done <<< "$REQUIRED_CHECKS"
           fi
 
-          # GITHUB_TOKEN cannot merge changes to workflow files, so leave any
-          # such PR (normally a GitHub Actions bump) for a manual merge.
-          workflow_files=$(gh api --paginate "repos/$REPO/pulls/$pr/files?per_page=100" \
-            --jq '.[] | select(.filename | startswith(".github/workflows/")) | .filename')
-          if [ -n "$workflow_files" ]; then
-            echo "::notice::PR #$pr changes .github/workflows/ ($(echo "$workflow_files" | paste -sd, -)); GITHUB_TOKEN cannot merge workflow changes, leaving it for a manual merge."
+          if [ "$mode" = review ]; then
+            request_review "$pr" "$why, checks passed on $HEAD_SHA"
             exit 0
           fi
 
