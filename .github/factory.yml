@@ -1,0 +1,9 @@
+# touchlineHQ/.github's own gh-factory overrides (see adamsuk/gh-factory README, "Per-repo overrides").
+
+# Factory agents (see the gh-factory README, "Agents"). Merging stays off (the default), and the
+# touchlineHQ merge pause applies anyway (software-factory AGENTS.md section 6).
+agents:
+  # CodeRabbit reviews PRs here (it reviewed #4), so a merge also needs no blocking CodeRabbit
+  # findings, plus PR Reviewer's review.
+  review_bot: coderabbit
+  # No test_command: this repo has no test suite, so CI (changelog, CodeQL) is the only check.
