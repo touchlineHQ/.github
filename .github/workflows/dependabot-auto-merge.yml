@@ -348,6 +348,17 @@ jobs:
             exit 1
           fi
 
+          # GITHUB_TOKEN cannot merge changes to workflow files, so such a PR is
+          # outside the policy from the start, whatever its update-type.
+          if [ "$rc" -eq 0 ]; then
+            workflow_files=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" \
+              --jq '.[] | select(.filename | startswith(".github/workflows/")) | .filename')
+            if [ -n "$workflow_files" ]; then
+              echo "PR #$PR_NUMBER changes .github/workflows/; GITHUB_TOKEN cannot merge it, so it is left for a person."
+              rc=1
+            fi
+          fi
+
           names=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.labels[].name')
           labelled=false
           if printf '%s\n' "$names" | grep -Fxq "$AUTOMERGE_LABEL"; then
@@ -599,7 +610,7 @@ jobs:
                 return 1
               fi
               logins="$logins$login"$'\n'
-            done <<< "$(printf '%s' "$REVIEWERS" | tr ',' '\n')"
+            done <<< "$(printf '%s' "${REVIEWERS:-}" | tr ',' '\n')"
             if [ -z "$logins" ]; then
               owner=${REPO%%/*}
               if [ "$(gh api "users/$owner" --jq '.type')" = "User" ]; then
@@ -647,6 +658,20 @@ jobs:
           printf '%s\n' "$reason"
           if [ "$rc" -eq 2 ]; then
             exit 1
+          fi
+
+          # GITHUB_TOKEN cannot merge changes to workflow files, so leave any such PR
+          # (normally a GitHub Actions bump) for a person. Classified before the checks,
+          # so any native auto-merge is turned off before they finish.
+          why="outside the auto-merge policy"
+          if [ "$rc" -eq 0 ]; then
+            workflow_files=$(gh api --paginate "repos/$REPO/pulls/$pr/files?per_page=100" \
+              --jq '.[] | select(.filename | startswith(".github/workflows/")) | .filename')
+            if [ -n "$workflow_files" ]; then
+              echo "::notice::PR #$pr changes .github/workflows/ ($(echo "$workflow_files" | paste -sd, -)); GITHUB_TOKEN cannot merge workflow changes, leaving it for a person."
+              why="changes .github/workflows/"
+              rc=1
+            fi
           fi
 
           if [ "$rc" -eq 0 ]; then
@@ -753,19 +778,7 @@ jobs:
           fi
 
           if [ "$mode" = review ]; then
-            request_review "$pr" "outside the auto-merge policy, checks passed on $HEAD_SHA"
-            exit 0
-          fi
-
-          # GITHUB_TOKEN cannot merge changes to workflow files, so leave any
-          # such PR (normally a GitHub Actions bump) for a manual merge.
-          workflow_files=$(gh api --paginate "repos/$REPO/pulls/$pr/files?per_page=100" \
-            --jq '.[] | select(.filename | startswith(".github/workflows/")) | .filename')
-          if [ -n "$workflow_files" ]; then
-            echo "::notice::PR #$pr changes .github/workflows/ ($(echo "$workflow_files" | paste -sd, -)); GITHUB_TOKEN cannot merge workflow changes, leaving it for a manual merge."
-            if [ "$REQUEST_REVIEW" = "true" ]; then
-              request_review "$pr" "changes .github/workflows/, checks passed on $HEAD_SHA"
-            fi
+            request_review "$pr" "$why, checks passed on $HEAD_SHA"
             exit 0
           fi
 

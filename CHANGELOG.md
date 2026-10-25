@@ -22,3 +22,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - Dependabot auto-merge turns off any native auto-merge that was enabled on a pull request outside the policy, in both the label and merge jobs.
+- A Dependabot pull request that changes `.github/workflows/` is classified as outside the policy up front in both jobs (label removed, native auto-merge turned off), rather than only being skipped just before the merge.
